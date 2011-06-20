@@ -1,10 +1,10 @@
 #!/usr/bin/perl
 
+use XML::Simple;
 use Data::Dumper;
 use Getopt::Long;
 use Cwd;
 
-$REVISION_MAP = "./.svn/svnmirror-revision-map";
 $NOWHERE = "<<<SOMEWHERE-OUTSIDE-THE-TREE>>>";
 
 # safeExec
@@ -33,92 +33,6 @@ sub safeExec(@) {
     return $data;
 }
 
-# parseXml(xmldata)
-#
-# VERY simplistic XML parser, good enough to convert overall structure
-# into a hashmap/array structure to allow traversal and extraction of sub-elements
-
-sub parseXml {
-    my ($data) = @_;
-    my (%result, $tag, $attrs, $body);
-    $@ = '';
-    
-    # Remove <?xml ...> line
-    $data =~ s/^\s*<\?xml[^>]*>//s;
-    
-    # uin until we have nothing but spaces, if that
-    while ($data !~ /^\s*$/s) {
-    
-        # Strip the opening tag (alphanumerics and colon to include any
-        # namespace. It will be left in $1.
-        if ($data =~ s/^\s*<([a-zA-Z0-9_\-:]+)([^>]*)>//s) {
-        
-            # Save the tag name and attributes
-            $tag = $1;
-            $attrs = $2;
-            
-            # Match everything up until the nearest closing tag.
-            # See http://docstore.mik.ua/orelly/perl/cookbook/ch06_16.htm for
-            # an idea of why we use this horrible nested negative lookahead
-            # construction ... but basically it's needed for speed.
-            if ($data =~ s/^((?:(?!<\/$tag>).)*)<\/$tag>\s*//s) {
-                $body = $1;
-
-                # Now strip the namespace from the tag
-                $tag =~ s/^[^:]+://;
-
-                my $child = $body;
-                # If element contains sub-elements then we need to parse deeper
-                if ($body =~ /^\s*</s) {
-                    $child = parseXml($body);
-                }
-                else {
-                    # Basic unquoting ...
-                    $body =~ s/\&lt;/</g;
-                    $body =~ s/\&gt;/>/g;
-                    $body =~ s/\&amp;/\&/g;
-                    $child = { '$text' => $body };
-                }
-
-                # Add attributes, if any
-                addAttrs($attrs, $child);
-                
-                # reference to hold (potential) multiple children.
-                if (!defined($result{$tag})) {
-                    # Initial element, set up array
-                    $result{$tag}[0] = $child;
-                }
-                else {
-                    # Subsequent values
-                    push(@{$result{$tag}}, $child);
-                }
-                
-            }
-            else {
-                $@ = "Unparseable XML data - unclosed '$tag' tag?: $data\n";
-                return undef;
-            }
-        }
-        else {
-            $@ = "Unparseable XML data: $data\n";
-            $data = '';
-            return undef;
-        }
-    }
-    
-    return \%result;
-}
-
-sub addAttrs($$) {
-    my ($text, $child) = @_;
-    
-    while ($text =~ s/^\s*([^'"]+)=[\"\']([^\"\']*)[\"\']//s) {
-        my $attr = $1;
-        my $val = $2;
-        $child->{"\@$attr"} = $val;
-    }
-}
-
 sub svn {
     print ">> svn @_\n";
     my $result = safeExec("svn", @_);
@@ -132,39 +46,44 @@ sub parseHistory {
     my ($xml, $root, $savePaths) = @_;
     my %history;
     
-    my $parseTree = parseXml($xml);
+    my $parseTree = XMLin($xml, ForceArray => ['path', 'logentry']);
     
-    foreach my $entry (@{$parseTree->{'log'}[0]{'logentry'}}) {
-        my $revno = $entry->{'@revision'};
+    foreach my $entry (@{$parseTree->{'logentry'}}) {
+        my $revno = $entry->{'revision'};
         
-        $history{$revno}{author} = $entry->{'author'}[0]{'$text'};
-        $history{$revno}{msg} = $entry->{'msg'}[0]{'$text'};
-        $history{$revno}{date} = $entry->{'date'}[0]{'$text'};
+        $history{$revno}{author} = $entry->{'author'};
+        $history{$revno}{msg} = $entry->{'msg'};
+        $history{$revno}{date} = $entry->{'date'};
         $history{$revno}{copy} = [];
-        foreach my $path (@{$entry->{'paths'}[0]{'path'}}) {
+        $history{$revno}{A} = [];
+        $history{$revno}{M} = [];
+        $hsitory{$revno}{D} = [];
+        foreach my $path (@{$entry->{'paths'}{'path'}}) {
             my $skip = 0;
-            if (defined($path->{'@copyfrom-path'})) {
-                my $from = $path->{'@copyfrom-path'};
-                my $to = $path->{'$text'};
+            if (defined($path->{'copyfrom-path'})) {
+                my $from = $path->{'copyfrom-path'};
+                my $to = $path->{'content'};
 
                 if ($from =~ s!^$root/!/!) {
                     if ($to =~ s!^$root/!/!) {
-                        push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $to, 'rev' => $path->{'@copyfrom-rev'} });
+                        push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $to, 'rev' => $path->{'copyfrom-rev'} });
                     }
                     else {
                         print "Warning: Copy to path outside tree ($to) ignored\n";
-                        push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $NOWHERE, 'rev' => $path->{'@copyfrom-rev'} });
+                        push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $NOWHERE, 'rev' => $path->{'copyfrom-rev'} });
                         $skip++;
                     }
                 }
                 else {
                     print "Warning: Copy from a path outside tree ($from) will result in complete addition\n";
+                    $to =~ s!^$root/!/!;
+                    push(@{$history{$revno}{copy}}, { 'to' => $to });
                 }
             }
-            if ($savePaths) {
-                my $relPath = $path->{'$text'};
+            elsif ($savePaths) {
+                my $relPath = $path->{'content'};
                 $relPath =~ s!^$root/!/!;
-                $history{$revno}{'paths'}{$relPath} = $path->{'@action'} unless ($skip);
+                push(@{$history{$revno}{$path->{'action'}}}, $relPath);
             }
         }
     }
@@ -182,7 +101,7 @@ sub revisionRange {
 
 sub loadHistory {
     my ($repo, $lower, $upper, $root, $savePaths) = @_;
-    my $xml = svn("log", "--xml", "--verbose", "-r", "$lower:$upper", $repo);
+    my $xml = svn("log", "--xml", "--verbose", "--with-all-revprops", "-r", "$lower:$upper", $repo);
     my $history = parseHistory($xml, $root, $savePaths);
     
     $history;
@@ -203,18 +122,18 @@ sub loadRevisionMap {
 }
 
 sub wcVersion {
-    svn("update");
-    my $xml = svn("info", "--xml");
-    my $parseTree = parseXml($xml);
-    $parseTree->{'info'}[0]{'entry'}[0]{'@revision'};
+    svn("update", @_);
+    my $xml = svn("info", "--xml", @_);
+    my $parseTree = XMLin($xml);
+    $parseTree->{'entry'}{'revision'};
 }
 
 sub getRoot {
     my ($url) = @_;
     my $xml = svn("info", "--xml", $url);
-    my $parseTree = parseXml($xml);
-    my $result = $parseTree->{'info'}[0]{'entry'}[0]{'url'}[0]{'$text'};
-    my $rootUrl = $parseTree->{'info'}[0]{'entry'}[0]{'repository'}[0]{'root'}[0]{'$text'};
+    my $parseTree = XMLin($xml);
+    my $result = $parseTree->{'entry'}{'url'};
+    my $rootUrl = $parseTree->{'entry'}{'repository'}{'root'};
     $result =~ s/^\Q$rootUrl\E//;
 
     $result;
@@ -268,15 +187,16 @@ sub localRevisionFor {
 }
 
 sub cleanupWc {
-    svn("cleanup");
-    svn("revert", "--recursive", ".");
-    my $statusXml = svn("status", "--xml");
-    my $tree = parseXml($statusXml);
+    my $dir = shift;
+    svn("cleanup", $dir);
+    svn("revert", "--recursive", $dir);
+    my $statusXml = svn("status", "--xml", $dir);
+    my $tree = XMLin($statusXml, ForceArray => ['entry']);
 
-    foreach my $entry (@{$tree->{'status'}[0]{'target'}[0]{'entry'}}) {
-        if ($entry->{'wc-status'}[0]{'@item'} eq 'unversioned') {
-            print "> Removing unversioned file $entry->{'@path'}\n";
-            safeExec("rm", "-rf", $entry->{'@path'});
+    foreach my $entry (@{$tree->{'target'}{'entry'}}) {
+        if ($entry->{'wc-status'}{'item'} eq 'unversioned') {
+            print "> Removing unversioned file $entry->{'path'}\n";
+            safeExec("rm", "-rf", $entry->{'path'});
         }
     }
 }
@@ -284,11 +204,11 @@ sub cleanupWc {
 sub fixSvnIgnoreProperties {
 
     my $statusXml = svn("status", "--xml");
-    my $tree = parseXml($statusXml);
+    my $tree = XMLin($statusXml, ForceArray => ['entry']);
 
-    foreach my $entry (@{$tree->{'status'}[0]{'target'}[0]{'entry'}}) {
-        if ($entry->{'wc-status'}[0]{'@item'} ne 'deleted') {
-            my $path = $entry->{'@path'};
+    foreach my $entry (@{$tree->{'target'}{'entry'}}) {
+        if ($entry->{'wc-status'}{'item'} ne 'deleted') {
+            my $path = $entry->{'path'};
             my $prop = svn("propget", "svn:ignore", $path);
             if ($prop ne '') {
                 print ">>> Sanitising svn:ignore on $path\n";
@@ -310,45 +230,26 @@ sub recreateLocalFromRemote {
     close($fh);
 }
 
-sub resolveConflicts {
-    my ($rev, $history) = @_;
-    my $statusXml = svn("status", "--xml");
-    my $tree = parseXml($statusXml);
-    
-    # Look for conflicts and try to resolve
-    foreach my $entry (@{$tree->{'status'}[0]{'target'}[0]{'entry'}}) {
-        if ($entry->{'wc-status'}[0]{'@tree-conflicted'} eq 'true') {
-            my $path = $entry->{'@path'};
-            if ($history->{$rev}{'paths'}{"/$path"} eq 'D') {
-                print ">>> Resolving conflict for $path -- deleting\n";
-                svn("rm", "--force", $path);
-            }
-            elsif (-f $path) {
-                print ">>> Resolving conflict for $path -- overwriting local\n";
-                recreateLocalFromRemote($rev, $path);
-            }
-            elsif (-e $path) {
-                print ">>> Resolving conflict for $path -- accepting local\n";
-            }            else {
-                die "$0: $path missing when trying to resolve conflict\n";
-            }
-        }
+sub getProperties {
+    my $file = shift;
+    my $xml = svn("proplist", "-v", "--xml", $file);
+    my $tree = XMLin($xml, ForceArray => ['property']);
+    my %props;
+
+    foreach $property (keys(%{$tree->{'target'}{'property'}})) {
+        $props{$property} = $tree->{'target'}{'property'}{$property}{'content'};
     }
     
-    # Check all additional files for consistency, add and delete as appropriate
-    foreach my $path (sort(keys(%{$history->{$rev}{'paths'}}))) {
-        my $state = $history->{$rev}{'paths'}{$path};
-        $path =~ s!^/!!;
-        
-        if ($state eq 'A' && ! -e $path) {
-            recreateLocalFromRemote($rev, $path);
-            svn("add", $path);
-        }
-        elsif ($state eq 'D' && -e $path) {
-            svn("rm", "--force", $path);
-        }
+    %props;
+}
+
+sub setProperties {
+    my $file = shift;
+    my %props = @_;
+    
+    foreach my $property (keys(%props)) {
+        svn("propset", $property, $props{$property}, $file);
     }
-    svn('resolve', '--non-interactive', '--accept=working', '--recursive', '.');
 }
 
 ###
@@ -356,13 +257,15 @@ sub resolveConflicts {
 ###
 
 $WorkingDir = undef;
+$SrcWorkingDir = undef;
 $FixRevprops = 0;
 $RetryCommit = 0;
 
 GetOptions(
-            "working-dir|w=s" => \$WorkingDir,
+            "target-working-dir|w=s" => \$WorkingDir,
             "fix-revprops|p" => \$FixRevprops,
             "retry-commit|r" => \$RetryCommit,
+            "source-working-dir|s=s" => \$SrcWorkingDir,
           );
           
 die "Usage: $0 [options] source-url target-url\n" unless ($#ARGV == 1);
@@ -373,29 +276,30 @@ $TargetURL = shift;
 $TargetURL =~ s!/+$!!;
 unless (defined($WorkingDir)) {
     $WorkingDir = (split('/', $TargetURL))[-1];
-    $WorkingDir .= "_svnmirror_";
+    $WorkingDir .= "_mirror_dst";
     $WorkingDir = getcwd() . "/" . $WorkingDir;
 }
+$REVISION_MAP = "$WorkingDir/.svn/svnmirror-revision-map";
 
-print "Working directory: $WorkingDir\n";
+unless (defined($SrcWorkingDir)) {
+    $SrcWorkingDir = (split('/', $TargetURL))[-1];
+    $SrcWorkingDir .= "_mirror_src";
+    $SrcWorkingDir = getcwd() . "/" . $SrcWorkingDir;
+}
+
+print "Target Working directory: $WorkingDir\n";
 unless (-d $WorkingDir) {
     print "Directory does not exist, doing fresh checkout\n";
     $msg = svn("checkout", $TargetURL, $WorkingDir);
     die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
 }
-chdir($WorkingDir);
-
-if (!$RetryCommit) {
-    print "Cleaning working copy\n";
-    cleanupWc();
-}
 
 print "Loading local history ...\n";
-$LocalHistory = loadHistory(".", 0, 'HEAD', '', 0);
+$LocalHistory = loadHistory($WorkingDir, 0, 'HEAD', '', 0);
 @localRevs = historyRevisions($LocalHistory);
 
 loadRevisionMap();
-$wcVersion = wcVersion();
+$wcVersion = wcVersion($WorkingDir);
 if ($wcVersion > 0 && !defined($RevisionMap{'local'}{$wcVersion})) {
     print "Warning: Revision map cache is corrupted, discarding\n";
     %RevisionMap = ();
@@ -407,13 +311,26 @@ else {
 
 
 print "Loading remote history from revision $lowerBound ...\n";
-$RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL), 0);
+$RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL), 1);
 @remoteRevs = historyRevisions($RemoteHistory);
 
 # If the remote URL isn't the repo root then the first entry will be the creation of the
 # top-level directory, in which case we must discard this one.
-shift(@remoteRevs) if ($remoteRevs[0] != 1);
- 
+$firstRemote = 0;
+$firstRemote = shift(@remoteRevs) if ($remoteRevs[0] != 1);
+
+print "Source working directory: $SrcWorkingDir\n";
+unless (-d $SrcWorkingDir) {
+    print "Directory does not exist, doing fresh checkout\n";
+    $msg = svn("checkout", "-r", "$firstRemote", $SourceURL, $SrcWorkingDir);
+    die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
+}
+
+if (!$RetryCommit) {
+    print "Cleaning working copies\n";
+    cleanupWc($WorkingDir);
+    cleanupWc($SrcWorkingDir);
+} 
 # Rebuild the revision map
 if ($lowerBound == 0 && $#localRevs >= 0) {
     die "$0: Fewer remote revisions found than existing local ones ($#remoteRevs < $#localRevs)\n" if ($#remoteRevs < $#localRevs);
@@ -433,22 +350,55 @@ foreach $rev (@remoteRevs) {
         print ">> Retrying commit with current state\n";
     }
     else {
-        svn('update');
+        svn('update', $WorkingDir);
+        print svn('update', '-r', $rev, $SrcWorkingDir);
+        
         # Sort copies lexicographically to ensure higher paths created first
         foreach my $copy (sort {$a->{'to'} cmp $b->{'to'}} (@{$RemoteHistory->{$rev}{copy}})) {
             my $from = "." . $copy->{'from'};
             my $to = "." . $copy->{'to'};
             my $rev = localRevisionFor($copy->{'rev'});
-            unless ($copy->{'to'} eq $NOWHERE) {
+            if ($copy->{'from'} eq '') {
+                # Import from outside the tree
+                svn("export", "$SrcWorkingDir/$to", "$WorkingDir/$to");
+                svn("add", "$WorkingDir/$to");
+                ### TODO: Handle properties on copied-in files
+            }
+            elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
                 if (-f $to) {
-                    svn("rm", "--force", $to);
+                    svn("rm", "--force", "$WorkingDir/$to");
                 }
-                svn('copy', "--parents", "$from\@$rev", "$to") unless ($copy->{'to'} eq $NOWHERE);
+                svn('copy', "--parents", "$WorkingDir/$from\@$rev", "$WorkingDir/$to") unless ($copy->{'to'} eq $NOWHERE);
             }
         }
         
-        print svn('merge', '-c', $rev, '--non-interactive', '--accept=theirs-full', "$SourceURL/\@$rev");
+        # Now handle all adds/modifies/deletes
+
+        foreach my $add (sort(@{$RemoteHistory->{$rev}{'A'}})) {
+print "Adding $add\n";
+            if (-d "$SrcWorkingDir/$add") {
+                svn("mkdir", "--parents", "$WorkingDir/$add");
+            }
+            else {
+                safeExec("cp", "$SrcWorkingDir/$add", "$WorkingDir/$add");
+                svn("add", "$WorkingDir/$add");
+            }
+            setProperties("$WorkingDir/$add", getProperties("$SrcWorkingDir/$add"));
+        }
+
+        foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
+print "Removing $del\n";
+            svn("remove", "--force", "$WorkingDir/$del");
+        }        
+
+        foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
+print "Updating $mod\n";
+            if (! -d "$SrcWorkingDir/$mod") {
+                safeExec("cp", "-f", "$SrcWorkingDir/$mod", "$WorkingDir/$mod");
+            }
+            setProperties("$WorkingDir/$mod", getProperties("$SrcWorkingDir/$mod"));
+        }        
     }
     
     my $msg = $RemoteHistory->{$rev}{'msg'};
@@ -458,7 +408,7 @@ foreach $rev (@remoteRevs) {
     }
     
     eval {
-        print svn('commit', '-m', $msg);
+        print svn('commit', '-m', $msg, $WorkingDir);
     };
     
     if ($@ ne '') {
@@ -466,21 +416,18 @@ foreach $rev (@remoteRevs) {
             print ">> Commit failed because of non-LF endings in svn:ignore property -- attempting fix\n";
             fixSvnIgnoreProperties();
         }
-        elsif ($@ =~ /remains in conflict/) {
-            resolveConflicts($rev, loadHistory($SourceURL, $rev, $rev, getRoot($SourceURL), 1));
-        }
         # Try again, last chance
-        print svn('commit', '-m', $msg);
+        print svn('commit', '-m', $msg, $WorkingDir);
     }
     
-    my $newRev = wcVersion();
+    my $newRev = wcVersion($WorkingDir);
     print "> Local revision $newRev created\n";
     
     updateRevisionMap($newRev, $rev, 1);
     
     if ($FixRevprops) {
-        svn("propset", "svn:author", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'author'}, ".");
-        svn("propset", "svn:date", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'date'}, ".");
+        svn("propset", "svn:author", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'author'}, "$WorkingDir");
+        svn("propset", "svn:date", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'date'}, "$WorkingDir");
     }
     
     $RetryCommit = 0;
