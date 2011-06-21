@@ -90,7 +90,7 @@ sub parseHistory {
             }
             elsif ($savePaths) {
                 my $relPath = $path->{'content'};
-                $relPath =~ s!^$root/!/!;
+                $relPath =~ s!^$root/?\b!/!;
                 push(@{$history{$revno}{$path->{'action'}}}, $relPath);
                 $history{$revno}{common} = longestCommonPath($history{$revno}{common}, $relPath);
             }
@@ -123,15 +123,9 @@ sub longestCommonPath {
         }
     }
 
-    join('/', @longest);
-}
-
-sub revisionRange {
-    my ($history) = @_;
-    
-    my @revs = sort {$a <=> $b} (keys(%{$history}));
-    $revs[0] = 0 unless ($revs[0]);
-    ($revs[0], $revs[-1]);
+    my $result = join('/', @longest);
+    $result = "./" if ($result eq '');
+    $result;
 }
 
 sub loadHistory {
@@ -236,35 +230,6 @@ sub cleanupWc {
     }
 }
 
-sub fixSvnIgnoreProperties {
-
-    my $statusXml = svn("status", "--xml");
-    my $tree = XMLin($statusXml, ForceArray => ['entry']);
-
-    foreach my $entry (@{$tree->{'target'}{'entry'}}) {
-        if ($entry->{'wc-status'}{'item'} ne 'deleted') {
-            my $path = $entry->{'path'};
-            my $prop = svn("propget", "svn:ignore", $path);
-            if ($prop ne '') {
-                print ">>> Sanitising svn:ignore on $path\n";
-                $prop =~ s/\r//gs;
-                svn("propset", "svn:ignore", $prop, $path);
-            }
-        }
-    }
-}
-
-sub recreateLocalFromRemote {
-    my ($rev, $path) = @_;
-    $path =~ s!^/!!;
-    
-    my $data = svn("cat", "-r", $rev, "$SourceURL/$path\@$rev");
-    my $fh;
-    die "$0: Can't overwrite '$path' ($1)\n" unless open($fh, ">$path");
-    print $fh $data;
-    close($fh);
-}
-
 sub getProperties {
     my $file = shift;
     my $xml = svn("proplist", "-v", "--xml", $file);
@@ -307,8 +272,17 @@ sub urlIsRepoRoot {
     $tree->{entry}{url} eq $tree->{entry}{repository}{root};
 }
 
+sub canonicalise {
+    my $path = shift;
+    
+    1 while ($path =~ s!\/\.\/!/!g);
+    1 while ($path =~ s![^:]\K//!/!g);
+    
+    $path;
+}
+
 ###
-###
+### Main Code
 ###
 
 $DestWorkingDir = undef;
@@ -423,34 +397,40 @@ foreach $rev (@remoteRevs) {
     else {
         $commonRoot = $RemoteHistory->{$rev}{common};
         $commonRoot =~ s!/[^/]*$!/! unless (-d "$SrcWorkingDir/$commonRoot");
-
-        svn('update', "$DestWorkingDir/$commonRoot");
-        print svn('update', '-r', $rev, "$SrcWorkingDir/$commonRoot");
+        $commonRoot = canonicalise($commonRoot);
+        
+        svn('update', canonicalise("$DestWorkingDir/$commonRoot"));
+        print svn('update', '-r', $rev, canonicalise("$SrcWorkingDir/$commonRoot"));
         
         # Sort copies lexicographically to ensure higher paths created first
         foreach my $copy (sort {$a->{'to'} cmp $b->{'to'}} (@{$RemoteHistory->{$rev}{copy}})) {
             my $from = "." . $copy->{'from'};
             my $to = "." . $copy->{'to'};
+            my $srcFrom = canonicalise("$SrcWorkingDir/$from");
+            my $srcTo = canonicalise("$SrcWorkingDir/$to");
+            my $destFrom = canonicalise("$DestWorkingDir/$from");
+            my $destTo = canonicalise("$DestWorkingDir/$to");
             my $rev = localRevisionFor($copy->{'rev'});
             if ($copy->{'from'} eq '') {
                 # Import from outside the tree
                 print "> Copy to $to from outside the tree\n";
-                svn("export", "$SrcWorkingDir/$to", "$DestWorkingDir/$to");
-                svn("add", "$DestWorkingDir/$to");
+                svn("export", "$srcTo", "$destTo");
+                svn("add", "$destTo");
                 ### TODO: Handle properties on copied-in files
             }
             elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
                 print "> Copy to $to from $from\n";
                 if (-f $to) {
-                    svn("rm", "--force", "$DestWorkingDir/$to");
+                    svn("rm", "--force", "$destTo");
                 }
-                svn('copy', "--parents", "$DestWorkingDir/$from\@$rev", "$DestWorkingDir/$to");
+                svn('copy', "--parents", "$destFrom\@$rev", "$destTo");
                 # May be a modify of a file as well as a rename, so copy over
                 # the source file too!
                 if (-f "$SrcWorkingDir/$to") {
-                    safeExec("cp", "-f", "$SrcWorkingDir/$to", "$DestWorkingDir/$to");
-                    setProperties("$DestWorkingDir/$to", getProperties("$SrcWorkingDir/$to"));
+                    print "> Overwriting $destTo with copy from $srcTo\n";
+                    safeExec("cp", "-f", "$srcTo", "$destTo");
+                    setProperties("$destTo", getProperties("$srcTo"));
                 }
             }
         }
@@ -459,27 +439,31 @@ foreach $rev (@remoteRevs) {
 
         foreach my $add (sort(@{$RemoteHistory->{$rev}{'A'}})) {
             print "> Adding $add\n";
-            if (-d "$SrcWorkingDir/$add") {
-                svn("mkdir", "--parents", "$DestWorkingDir/$add");
+            my $srcAdd = canonicalise("$SrcWorkingDir/$add");
+            my $destAdd = canonicalise("$DestWorkingDir/$add");
+            if (-d $srcAdd) {
+                svn("mkdir", "--parents", $destAdd);
             }
             else {
-                safeExec("cp", "$SrcWorkingDir/$add", "$DestWorkingDir/$add");
-                svn("add", "$DestWorkingDir/$add");
+                safeExec("cp", $srcAdd, $destAdd);
+                svn("add", $destAdd);
             }
-            setProperties("$DestWorkingDir/$add", getProperties("$SrcWorkingDir/$add"));
+            setProperties($destAdd, getProperties($srcAdd));
         }
 
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
             print "> Removing $del\n";
-            svn("remove", "--force", "$DestWorkingDir/$del");
+            svn("remove", "--force", canonicalise("$DestWorkingDir/$del"));
         }        
 
         foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
             print "> Updating $mod\n";
-            if (! -d "$SrcWorkingDir/$mod") {
-                safeExec("cp", "-f", "$SrcWorkingDir/$mod", "$DestWorkingDir/$mod");
+            my $srcMod = canonicalise("$SrcWorkingDir/$mod");
+            my $destMod= canonicalise("$DestWorkingDir/$mod");
+            if (! -d $srcMod) {
+                safeExec("cp", "-f", $srcMod, $srcMod);
             }
-            setProperties("$DestWorkingDir/$mod", getProperties("$SrcWorkingDir/$mod"));
+            setProperties($destMod, getProperties($srcMod));
         }        
     }
     
@@ -488,18 +472,7 @@ foreach $rev (@remoteRevs) {
         $msg .= "\nAuthor: $RemoteHistory->{$rev}{revprops}{'svn:author'}\nDate: $RemoteHistory->{$rev}{revprops}{'svn:date'}\nRevision: $rev";
     }
     
-    eval {
-        print svn('commit', '-m', $msg, "$DestWorkingDir/$commonRoot");
-    };
-    
-    if ($@ ne '') {
-        if ($@ =~ /Cannot accept non-LF line endings in 'svn:ignore' property/) {
-            print ">> Commit failed because of non-LF endings in svn:ignore property -- attempting fix\n";
-            fixSvnIgnoreProperties();
-        }
-        # Try again, last chance
-        print svn('commit', '-m', $msg, "$DestWorkingDir/$commonRoot");
-    }
+    print svn('commit', '-m', $msg, canonicalise("$DestWorkingDir/$commonRoot"));
     
     my $newRev = wcVersion($DestWorkingDir);
     print "> Local revision $newRev created\n";
