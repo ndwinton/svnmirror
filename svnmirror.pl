@@ -299,18 +299,26 @@ sub revpropMustBeCopied {
     $result;
 }
 
+sub urlIsRepoRoot {
+    my $url = shift;
+    my $xml = svn("info", "--xml", $url);
+    my $tree = XMLin($xml);
+    
+    $tree->{entry}{url} eq $tree->{entry}{repository}{root};
+}
+
 ###
 ###
 ###
 
-$WorkingDir = undef;
+$DestWorkingDir = undef;
 $SrcWorkingDir = undef;
 $doCopyRevprops ='';
 $RetryCommit = 0;
 $UseStatusRevprop = 0;
 
 GetOptions(
-            "target-working-dir|w=s" => \$WorkingDir,
+            "target-working-dir|w=s" => \$DestWorkingDir,
             "copy-revprops|p=s" => \$doCopyRevprops,
             "retry-commit|r" => \$RetryCommit,
             "source-working-dir|s=s" => \$SrcWorkingDir,
@@ -330,12 +338,12 @@ $SourceURL = shift;
 $TargetURL = shift;
 
 $TargetURL =~ s!/+$!!;
-unless (defined($WorkingDir)) {
-    $WorkingDir = (split('/', $TargetURL))[-1];
-    $WorkingDir .= "_mirror_dst";
-    $WorkingDir = getcwd() . "/" . $WorkingDir;
+unless (defined($DestWorkingDir)) {
+    $DestWorkingDir = (split('/', $TargetURL))[-1];
+    $DestWorkingDir .= "_mirror_dst";
+    $DestWorkingDir = getcwd() . "/" . $DestWorkingDir;
 }
-$REVISION_MAP = "$WorkingDir/.svn/svnmirror-revision-map";
+$REVISION_MAP = "$DestWorkingDir/.svn/svnmirror-revision-map";
 
 unless (defined($SrcWorkingDir)) {
     $SrcWorkingDir = (split('/', $TargetURL))[-1];
@@ -343,19 +351,23 @@ unless (defined($SrcWorkingDir)) {
     $SrcWorkingDir = getcwd() . "/" . $SrcWorkingDir;
 }
 
-print "Target Working directory: $WorkingDir\n";
-unless (-d $WorkingDir) {
+print "Target Working directory: $DestWorkingDir\n";
+unless (-d $DestWorkingDir) {
     print "Directory does not exist, doing fresh checkout\n";
-    $msg = svn("checkout", $TargetURL, $WorkingDir);
+    $msg = svn("checkout", $TargetURL, $DestWorkingDir);
     die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
 }
 
 print "Loading local history ...\n";
-$LocalHistory = loadHistory($WorkingDir, 0, 'HEAD', '', 0);
+$LocalHistory = loadHistory($DestWorkingDir, 0, 'HEAD', '', 0);
 @localRevs = historyRevisions($LocalHistory);
 
+# If the local URL isn't the repo root then the first entry will be the
+# creation of the top-level directory, in which case we must discard this one.
+shift(@localRevs) unless (urlIsRepoRoot($TargetURL));
+
 loadRevisionMap();
-$wcVersion = wcVersion($WorkingDir);
+$wcVersion = wcVersion($DestWorkingDir);
 if ($wcVersion > 0 && !defined($RevisionMap{'local'}{$wcVersion})) {
     print "Warning: Revision map cache is corrupted, discarding\n";
     %RevisionMap = ();
@@ -373,7 +385,7 @@ $RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL
 # If the remote URL isn't the repo root, and we're not loading a partial history,
 # then the first entry will be the creation of the top-level directory, in which
 # case we must discard this one.
-shift(@remoteRevs) if ($lowerBound == 0 && $remoteRevs[0] != 1);
+shift(@remoteRevs) if ($lowerBound == 0 && !urlIsRepoRoot($SourceURL));
 $firstRemote = $remoteRevs[0];
 
 print "Source working directory: $SrcWorkingDir\n";
@@ -385,7 +397,7 @@ unless (-d $SrcWorkingDir) {
 
 if (!$RetryCommit) {
     print "Cleaning working copies\n";
-    cleanupWc($WorkingDir);
+    cleanupWc($DestWorkingDir);
     cleanupWc($SrcWorkingDir);
 } 
 # Rebuild the revision map
@@ -412,7 +424,7 @@ foreach $rev (@remoteRevs) {
         $commonRoot = $RemoteHistory->{$rev}{common};
         $commonRoot =~ s!/[^/]*$!/! unless (-d "$SrcWorkingDir/$commonRoot");
 
-        svn('update', "$WorkingDir/$commonRoot");
+        svn('update', "$DestWorkingDir/$commonRoot");
         print svn('update', '-r', $rev, "$SrcWorkingDir/$commonRoot");
         
         # Sort copies lexicographically to ensure higher paths created first
@@ -423,17 +435,22 @@ foreach $rev (@remoteRevs) {
             if ($copy->{'from'} eq '') {
                 # Import from outside the tree
                 print "> Copy to $to from outside the tree\n";
-                svn("export", "$SrcWorkingDir/$to", "$WorkingDir/$to");
-                svn("add", "$WorkingDir/$to");
+                svn("export", "$SrcWorkingDir/$to", "$DestWorkingDir/$to");
+                svn("add", "$DestWorkingDir/$to");
                 ### TODO: Handle properties on copied-in files
             }
             elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
                 print "> Copy to $to from $from\n";
                 if (-f $to) {
-                    svn("rm", "--force", "$WorkingDir/$to");
+                    svn("rm", "--force", "$DestWorkingDir/$to");
                 }
-                svn('copy', "--parents", "$WorkingDir/$from\@$rev", "$WorkingDir/$to") unless ($copy->{'to'} eq $NOWHERE);
+                svn('copy', "--parents", "$DestWorkingDir/$from\@$rev", "$DestWorkingDir/$to");
+                # May be a modify of a file as well as a rename, so copy over
+                # the source file too!
+                if (-f "$SrcWorkingDir/$to") {
+                    safeExec("cp", "-f", "$SrcWorkingDir/$to", "$DestWorkingDir/$to");
+                }
             }
         }
         
@@ -442,26 +459,26 @@ foreach $rev (@remoteRevs) {
         foreach my $add (sort(@{$RemoteHistory->{$rev}{'A'}})) {
             print "> Adding $add\n";
             if (-d "$SrcWorkingDir/$add") {
-                svn("mkdir", "--parents", "$WorkingDir/$add");
+                svn("mkdir", "--parents", "$DestWorkingDir/$add");
             }
             else {
-                safeExec("cp", "$SrcWorkingDir/$add", "$WorkingDir/$add");
-                svn("add", "$WorkingDir/$add");
+                safeExec("cp", "$SrcWorkingDir/$add", "$DestWorkingDir/$add");
+                svn("add", "$DestWorkingDir/$add");
             }
-            setProperties("$WorkingDir/$add", getProperties("$SrcWorkingDir/$add"));
+            setProperties("$DestWorkingDir/$add", getProperties("$SrcWorkingDir/$add"));
         }
 
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
             print "> Removing $del\n";
-            svn("remove", "--force", "$WorkingDir/$del");
+            svn("remove", "--force", "$DestWorkingDir/$del");
         }        
 
         foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
             print "> Updating $mod\n";
             if (! -d "$SrcWorkingDir/$mod") {
-                safeExec("cp", "-f", "$SrcWorkingDir/$mod", "$WorkingDir/$mod");
+                safeExec("cp", "-f", "$SrcWorkingDir/$mod", "$DestWorkingDir/$mod");
             }
-            setProperties("$WorkingDir/$mod", getProperties("$SrcWorkingDir/$mod"));
+            setProperties("$DestWorkingDir/$mod", getProperties("$SrcWorkingDir/$mod"));
         }        
     }
     
@@ -471,7 +488,7 @@ foreach $rev (@remoteRevs) {
     }
     
     eval {
-        print svn('commit', '-m', $msg, "$WorkingDir/$commonRoot");
+        print svn('commit', '-m', $msg, "$DestWorkingDir/$commonRoot");
     };
     
     if ($@ ne '') {
@@ -480,10 +497,10 @@ foreach $rev (@remoteRevs) {
             fixSvnIgnoreProperties();
         }
         # Try again, last chance
-        print svn('commit', '-m', $msg, "$WorkingDir/$commonRoot");
+        print svn('commit', '-m', $msg, "$DestWorkingDir/$commonRoot");
     }
     
-    my $newRev = wcVersion($WorkingDir);
+    my $newRev = wcVersion($DestWorkingDir);
     print "> Local revision $newRev created\n";
     
     updateRevisionMap($newRev, $rev, 1);
@@ -491,13 +508,13 @@ foreach $rev (@remoteRevs) {
     foreach my $revprop (keys(%{$RemoteHistory->{$rev}{revprops}})) {
         if (revpropMustBeCopied($revprop)) {
             svn("propset", $revprop, "--revprop", "--revision", $newRev,
-                $RemoteHistory->{$rev}{revprops}{$revprop}, "$WorkingDir");
+                $RemoteHistory->{$rev}{revprops}{$revprop}, "$DestWorkingDir");
         }
     }
     
     if ($UseStatusRevprop) {
         svn("propset", "svnmirror:info", "--revprop", "--revision", $newRev,
-                "$rev/$RemoteHistory->{$rev}{revprops}{'svn:date'}", "$WorkingDir");
+                "$rev/$RemoteHistory->{$rev}{revprops}{'svn:date'}", "$DestWorkingDir");
     }
         
     $RetryCommit = 0;
