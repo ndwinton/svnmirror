@@ -58,7 +58,7 @@ function verify {
 
     diff -c src.ls dst.ls || fatal "$* - Recursive ls comparison failed"
     
-    svn pl $DSTROOT/to | grep 'test-property' || fatal "$* - Directory property not found"
+    svn pl $DSTROOT/to | grep -q 'test-property' || fatal "$* - Directory property not found"
 }
 
 SCRIPTDIR=$(cd $(dirname $0); pwd)
@@ -114,10 +114,13 @@ svn --quiet commit -m 'New unmirrored sub-dir' --username Tom
 # modification
 cd $SRCWC/from/subdir
 file=$(addNewFile insub)
+svn --quiet move $file $file.renamed
+svn commit --quiet -m "Rename $file"
 modfile=$(addNewFile insub)
 
 # Various copy operations, with or without modification of contents
 cd $SRCWC
+svn --quiet update
 svn --quiet copy unmirrored/subdir from/outside
 svn --quiet commit -m 'Copy from outside' --username Dick
 
@@ -125,13 +128,13 @@ svn --quiet copy from/subdir from/subdir-copy-1
 svn --quiet commit -m 'Copy within' --username Harry
 
 svn --quiet copy from/subdir from/subdir-copy-2
-cd $SRCWD/from/subdir-copy-2
+cd $SRCWC/from/subdir-copy-2
 echo modified >> $modfile
 cd $SRCWC
 svn --quiet commit -m 'Copy dir with modify file' --username Alice
 
 # Now test of copy-and-modify of a simple file.
-cd $SRCWD/from
+cd $SRCWC/from
 addfile=$(addNewFile copy)
 svn --quiet copy $addfile $addfile-copy
 echo modified >> $addfile-copy
@@ -146,7 +149,7 @@ svn --quiet commit -m 'Copy outside' --username Charlie
 cd $BASE
 
 svn --quiet mkdir $DSTROOT/other -m 'Create non-target dir'
-svn --quiet mkdir $DSTMIRROR -m 'Creat target mirror dir'
+svn --quiet mkdir $DSTMIRROR -m 'Create target mirror dir'
 
 echo "Mirroring ..."
 
@@ -159,7 +162,7 @@ file=$(addNewFile newfile)
 cd subdir
 file=$(addNewFile newfile)
 cd $SRCWD
-svn --quite copy subdir subdir-copy-3
+svn --quiet copy subdir subdir-copy-3
 svn commit --quiet -m 'Copy dir again'
 
 echo "Mirroring again ..."
@@ -170,11 +173,17 @@ perl -MDevel::Cover=-silent,1 $SCRIPTDIR/svnmirror.pl --copy-revprops=all $SRCMI
 verify "Phase 2"
 
 cd $SRCWC/from/subdir
-file=$(addNewFile newfile)
+delfile=$(addNewFile togo)
+file=$(addNewFile new)
+svn --quiet rm $delfile
+svn commit --quiet -m "Deleted $delfile"
+cd $SRCWC/from
+svn --quiet move subdir-copy-1 renamed
+svn commit --quiet -m 'Dir rename'
 
 cd $BASE
 
-echo "Mirroring (with new WD) ..."
+echo "Mirroring (with new working copies) ..."
 perl -MDevel::Cover=-silent,1 $SCRIPTDIR/svnmirror.pl --source-working-dir=wd.src --target-working-dir=dst.wd --copy-revprops=all $SRCMIRROR $DSTMIRROR
 
 verify "Phase 3"

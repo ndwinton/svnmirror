@@ -428,7 +428,7 @@ foreach $rev (@remoteRevs) {
                 # May be a modify of a file as well as a rename, so copy over
                 # the source file too!
                 if (-f "$SrcWorkingDir/$to") {
-                    print "> Overwriting $destTo with copy from $srcTo\n";
+                    print ">> cp -f $srcTo $destTo\n";
                     safeExec("cp", "-f", "$srcTo", "$destTo");
                     setProperties("$destTo", getProperties("$srcTo"));
                 }
@@ -461,7 +461,8 @@ foreach $rev (@remoteRevs) {
             my $srcMod = canonicalise("$SrcWorkingDir/$mod");
             my $destMod= canonicalise("$DestWorkingDir/$mod");
             if (! -d $srcMod) {
-                safeExec("cp", "-f", $srcMod, $srcMod);
+                print ">> cp -f $srcMod $destMod\n";
+                safeExec("cp", "-f", $srcMod, $destMod);
             }
             setProperties($destMod, getProperties($srcMod));
         }        
