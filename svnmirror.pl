@@ -450,6 +450,7 @@ foreach $rev (@remoteRevs) {
                 # the source file too!
                 if (-f "$SrcWorkingDir/$to") {
                     safeExec("cp", "-f", "$SrcWorkingDir/$to", "$DestWorkingDir/$to");
+                    setProperties("$DestWorkingDir/$to", getProperties("$SrcWorkingDir/$to"));
                 }
             }
         }
