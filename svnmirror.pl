@@ -46,20 +46,27 @@ sub parseHistory {
     my ($xml, $root, $savePaths) = @_;
     my %history;
     
-    my $parseTree = XMLin($xml, ForceArray => ['path', 'logentry']);
+    my $parseTree = XMLin($xml, ForceArray => ['path', 'logentry', 'revprops', 'property']);
     
     foreach my $entry (@{$parseTree->{'logentry'}}) {
         my $revno = $entry->{'revision'};
         
-        $history{$revno}{author} = $entry->{'author'};
         $history{$revno}{msg} = $entry->{'msg'};
-        $history{$revno}{date} = $entry->{'date'};
         $history{$revno}{copy} = [];
         $history{$revno}{A} = [];
         $history{$revno}{M} = [];
-        $hsitory{$revno}{D} = [];
+        $history{$revno}{D} = [];
+        $history{$revno}{common} = '';
+        
+        $history{$revno}{revprops}{'svn:author'} = $entry->{'author'};
+        $history{$revno}{revprops}{'svn:date'} = $entry->{'date'};
+        foreach my $rp (@{$entry->{revprops}}) {
+            foreach $prop (keys(%{$rp->{property}})) {
+                $history{$revno}{revprops}{$prop} = $rp->{property}{$prop}{content};
+            }
+        }
+
         foreach my $path (@{$entry->{'paths'}{'path'}}) {
-            my $skip = 0;
             if (defined($path->{'copyfrom-path'})) {
                 my $from = $path->{'copyfrom-path'};
                 my $to = $path->{'content'};
@@ -67,11 +74,12 @@ sub parseHistory {
                 if ($from =~ s!^$root/!/!) {
                     if ($to =~ s!^$root/!/!) {
                         push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $to, 'rev' => $path->{'copyfrom-rev'} });
+                        $history{$revno}{common} = longestCommonPath($history{$revno}{common}, $to);
+                        $history{$revno}{common} = longestCommonPath($history{$revno}{common}, $from);
                     }
                     else {
                         print "Warning: Copy to path outside tree ($to) ignored\n";
                         push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $NOWHERE, 'rev' => $path->{'copyfrom-rev'} });
-                        $skip++;
                     }
                 }
                 else {
@@ -84,11 +92,38 @@ sub parseHistory {
                 my $relPath = $path->{'content'};
                 $relPath =~ s!^$root/!/!;
                 push(@{$history{$revno}{$path->{'action'}}}, $relPath);
+                $history{$revno}{common} = longestCommonPath($history{$revno}{common}, $relPath);
             }
         }
     }
     
     \%history;
+}
+
+sub longestCommonPath {
+    my ($a, $b) = @_;
+    my $longest;
+    
+    if ($a eq '') {
+        $a = $b;
+    }
+    elsif ($b eq '') {
+        $b = $a;
+    }
+    my @aParts = split('/', $a);
+    my @bParts = split('/', $b);
+    my $i;
+    my @longest = ();
+    for ($i = 0; $i <= $#aParts; $i++) {
+        if ($aParts[$i] eq $bParts[$i]) {
+            push(@longest, $aParts[$i]);
+        }
+        else {
+            break;
+        }
+    }
+
+    join('/', @longest);
 }
 
 sub revisionRange {
@@ -122,7 +157,7 @@ sub loadRevisionMap {
 }
 
 sub wcVersion {
-    svn("update", @_);
+    svn("update", "--depth", "empty", @_);
     my $xml = svn("info", "--xml", @_);
     my $parseTree = XMLin($xml);
     $parseTree->{'entry'}{'revision'};
@@ -252,23 +287,44 @@ sub setProperties {
     }
 }
 
+sub revpropMustBeCopied {
+    my $revprop = shift;
+    my $result = 0;
+    
+    $result++ if ($CopyRevprop{$revprop});
+    if ($CopyRevprop{all} || $CopyRevprop{ALL}) {
+        $result++ unless ($CopyRevprop{"!$revprop"} || $CopyRevprop{"^$revprop"});
+    }
+    
+    $result;
+}
+
 ###
 ###
 ###
 
 $WorkingDir = undef;
 $SrcWorkingDir = undef;
-$FixRevprops = 0;
+$doCopyRevprops ='';
 $RetryCommit = 0;
+$UseStatusRevprop = 0;
 
 GetOptions(
             "target-working-dir|w=s" => \$WorkingDir,
-            "fix-revprops|p" => \$FixRevprops,
+            "copy-revprops|p=s" => \$doCopyRevprops,
             "retry-commit|r" => \$RetryCommit,
             "source-working-dir|s=s" => \$SrcWorkingDir,
+            "use-status-revprop|u" => \$UseStatusRevprop,
           );
           
 die "Usage: $0 [options] source-url target-url\n" unless ($#ARGV == 1);
+
+if ($doCopyRevprops ne '') {
+    $UseStatusRevprop++;
+    foreach my $prop (split(',', $doCopyRevprops)) {
+        $CopyRevprop{$prop}++;
+    }
+}
 
 $SourceURL = shift;
 $TargetURL = shift;
@@ -314,10 +370,11 @@ print "Loading remote history from revision $lowerBound ...\n";
 $RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL), 1);
 @remoteRevs = historyRevisions($RemoteHistory);
 
-# If the remote URL isn't the repo root then the first entry will be the creation of the
-# top-level directory, in which case we must discard this one.
-$firstRemote = 0;
-$firstRemote = shift(@remoteRevs) if ($remoteRevs[0] != 1);
+# If the remote URL isn't the repo root, and we're not loading a partial history,
+# then the first entry will be the creation of the top-level directory, in which
+# case we must discard this one.
+shift(@remoteRevs) if ($lowerBound == 0 && $remoteRevs[0] != 1);
+$firstRemote = $remoteRevs[0];
 
 print "Source working directory: $SrcWorkingDir\n";
 unless (-d $SrcWorkingDir) {
@@ -346,12 +403,17 @@ saveRevisionMap();
 foreach $rev (@remoteRevs) {
     print "> Processing remote revision $rev\n";
     
+    my $commonRoot = '';
+    
     if ($RetryCommit) {
         print ">> Retrying commit with current state\n";
     }
     else {
-        svn('update', $WorkingDir);
-        print svn('update', '-r', $rev, $SrcWorkingDir);
+        $commonRoot = $RemoteHistory->{$rev}{common};
+        $commonRoot =~ s!/[^/]*$!/! unless (-d "$SrcWorkingDir/$commonRoot");
+
+        svn('update', "$WorkingDir/$commonRoot");
+        print svn('update', '-r', $rev, "$SrcWorkingDir/$commonRoot");
         
         # Sort copies lexicographically to ensure higher paths created first
         foreach my $copy (sort {$a->{'to'} cmp $b->{'to'}} (@{$RemoteHistory->{$rev}{copy}})) {
@@ -360,12 +422,14 @@ foreach $rev (@remoteRevs) {
             my $rev = localRevisionFor($copy->{'rev'});
             if ($copy->{'from'} eq '') {
                 # Import from outside the tree
+                print "> Copy to $to from outside the tree\n";
                 svn("export", "$SrcWorkingDir/$to", "$WorkingDir/$to");
                 svn("add", "$WorkingDir/$to");
                 ### TODO: Handle properties on copied-in files
             }
             elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
+                print "> Copy to $to from $from\n";
                 if (-f $to) {
                     svn("rm", "--force", "$WorkingDir/$to");
                 }
@@ -376,7 +440,7 @@ foreach $rev (@remoteRevs) {
         # Now handle all adds/modifies/deletes
 
         foreach my $add (sort(@{$RemoteHistory->{$rev}{'A'}})) {
-print "Adding $add\n";
+            print "> Adding $add\n";
             if (-d "$SrcWorkingDir/$add") {
                 svn("mkdir", "--parents", "$WorkingDir/$add");
             }
@@ -388,12 +452,12 @@ print "Adding $add\n";
         }
 
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
-print "Removing $del\n";
+            print "> Removing $del\n";
             svn("remove", "--force", "$WorkingDir/$del");
         }        
 
         foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
-print "Updating $mod\n";
+            print "> Updating $mod\n";
             if (! -d "$SrcWorkingDir/$mod") {
                 safeExec("cp", "-f", "$SrcWorkingDir/$mod", "$WorkingDir/$mod");
             }
@@ -402,13 +466,12 @@ print "Updating $mod\n";
     }
     
     my $msg = $RemoteHistory->{$rev}{'msg'};
-
-    if (!$FixRevprops) {
-        $msg .= "\nAuthor: $RemoteHistory->{$rev}{'author'}\nDate: $RemoteHistory->{$rev}{'date'}\n";
+    if (!$UseStatusRevprop) {
+        $msg .= "\nAuthor: $RemoteHistory->{$rev}{revprops}{'svn:author'}\nDate: $RemoteHistory->{$rev}{revprops}{'svn:date'}\nRevision: $rev";
     }
     
     eval {
-        print svn('commit', '-m', $msg, $WorkingDir);
+        print svn('commit', '-m', $msg, "$WorkingDir/$commonRoot");
     };
     
     if ($@ ne '') {
@@ -417,7 +480,7 @@ print "Updating $mod\n";
             fixSvnIgnoreProperties();
         }
         # Try again, last chance
-        print svn('commit', '-m', $msg, $WorkingDir);
+        print svn('commit', '-m', $msg, "$WorkingDir/$commonRoot");
     }
     
     my $newRev = wcVersion($WorkingDir);
@@ -425,11 +488,18 @@ print "Updating $mod\n";
     
     updateRevisionMap($newRev, $rev, 1);
     
-    if ($FixRevprops) {
-        svn("propset", "svn:author", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'author'}, "$WorkingDir");
-        svn("propset", "svn:date", "--revprop", "--revision", $newRev, $RemoteHistory->{$rev}{'date'}, "$WorkingDir");
+    foreach my $revprop (keys(%{$RemoteHistory->{$rev}{revprops}})) {
+        if (revpropMustBeCopied($revprop)) {
+            svn("propset", $revprop, "--revprop", "--revision", $newRev,
+                $RemoteHistory->{$rev}{revprops}{$revprop}, "$WorkingDir");
+        }
     }
     
+    if ($UseStatusRevprop) {
+        svn("propset", "svnmirror:info", "--revprop", "--revision", $newRev,
+                "$rev/$RemoteHistory->{$rev}{revprops}{'svn:date'}", "$WorkingDir");
+    }
+        
     $RetryCommit = 0;
 }
 
