@@ -51,7 +51,13 @@ sub parseHistory {
     foreach my $entry (@{$parseTree->{'logentry'}}) {
         my $revno = $entry->{'revision'};
         
-        $history{$revno}{msg} = $entry->{'msg'};
+        if (ref($entry->{'msg'}) eq '') {
+            $history{$revno}{msg} = $entry->{'msg'};
+        }
+        else {
+            # An empty message shows up as an empty hash
+            $history{$revno}{msg} = '';
+        }
         $history{$revno}{copy} = [];
         $history{$revno}{A} = [];
         $history{$revno}{M} = [];
@@ -155,6 +161,13 @@ sub wcVersion {
     my $xml = svn("info", "--xml", @_);
     my $parseTree = XMLin($xml);
     $parseTree->{'entry'}{'revision'};
+}
+
+sub latestCommit {
+    svn("update", "--depth", "empty", @_);
+    my $xml = svn("info", "--xml", @_);
+    my $parseTree = XMLin($xml);
+    $parseTree->{'entry'}{'commit'}{'revision'};
 }
 
 sub getRoot {
@@ -290,6 +303,7 @@ $SrcWorkingDir = undef;
 $doCopyRevprops ='';
 $RetryCommit = 0;
 $UseStatusRevprop = 0;
+$SkipCleanup = 0;
 
 GetOptions(
             "target-working-dir|w=s" => \$DestWorkingDir,
@@ -297,6 +311,7 @@ GetOptions(
             "retry-commit|r" => \$RetryCommit,
             "source-working-dir|s=s" => \$SrcWorkingDir,
             "use-status-revprop|u" => \$UseStatusRevprop,
+            "skip-cleanup" => \$SkipCleanup,
           );
           
 die "Usage: $0 [options] source-url target-url\n" unless ($#ARGV == 1);
@@ -341,7 +356,7 @@ $LocalHistory = loadHistory($DestWorkingDir, 0, 'HEAD', '', 0);
 shift(@localRevs) unless (urlIsRepoRoot($TargetURL));
 
 loadRevisionMap();
-$wcVersion = wcVersion($DestWorkingDir);
+$wcVersion = latestCommit($DestWorkingDir);
 if ($wcVersion > 0 && !defined($RevisionMap{'local'}{$wcVersion})) {
     print "Warning: Revision map cache is corrupted, discarding\n";
     %RevisionMap = ();
@@ -351,6 +366,12 @@ else {
     $lowerBound = $RevisionMap{'local'}{$wcVersion} + 1;
 }
 
+print "Finding latest remote version ...\n";
+$latestRemote = latestCommit($SourceURL);
+if ($latestRemote < $lowerBound) {
+    print "Latest remote revision is $latestRemote, mirror is up to date\n";
+    exit 0;
+}
 
 print "Loading remote history from revision $lowerBound ...\n";
 $RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL), 1);
@@ -369,7 +390,7 @@ unless (-d $SrcWorkingDir) {
     die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
 }
 
-if (!$RetryCommit) {
+if (!$RetryCommit && !$SkipCleanup) {
     print "Cleaning working copies\n";
     cleanupWc($DestWorkingDir);
     cleanupWc($SrcWorkingDir);
@@ -475,7 +496,7 @@ foreach $rev (@remoteRevs) {
     
     print svn('commit', '-m', $msg, canonicalise("$DestWorkingDir/$commonRoot"));
     
-    my $newRev = wcVersion($DestWorkingDir);
+    my $newRev = latestCommit($DestWorkingDir);
     print "> Local revision $newRev created\n";
     
     updateRevisionMap($newRev, $rev, 1);
