@@ -381,20 +381,7 @@ $RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL
 # then the first entry will be the creation of the top-level directory, in which
 # case we must discard this one.
 shift(@remoteRevs) if ($lowerBound == 0 && !urlIsRepoRoot($SourceURL));
-$firstRemote = $remoteRevs[0];
 
-print "Source working directory: $SrcWorkingDir\n";
-unless (-d $SrcWorkingDir) {
-    print "Directory does not exist, doing fresh checkout\n";
-    $msg = svn("checkout", "-r", "$firstRemote", $SourceURL, $SrcWorkingDir);
-    die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
-}
-
-if (!$RetryCommit && !$SkipCleanup) {
-    print "Cleaning working copies\n";
-    cleanupWc($DestWorkingDir);
-    cleanupWc($SrcWorkingDir);
-} 
 # Rebuild the revision map
 if ($lowerBound == 0 && $#localRevs >= 0) {
     die "$0: Fewer remote revisions found than existing local ones ($#remoteRevs < $#localRevs)\n" if ($#remoteRevs < $#localRevs);
@@ -402,6 +389,19 @@ if ($lowerBound == 0 && $#localRevs >= 0) {
         my $remote = shift(@remoteRevs);
         updateRevisionMap($local, $remote, 0);
     }
+}
+
+print "Source working directory: $SrcWorkingDir\n";
+unless (-d $SrcWorkingDir) {
+    print "Directory does not exist, doing fresh checkout at revision $remoteRevs[0]\n";
+    $msg = svn("checkout", "-r", "$remoteRevs[0]", $SourceURL, $SrcWorkingDir);
+    die "$0: Failed to check out working copy ($@): $msg\n" unless ($? == 0);
+}
+
+if (!$RetryCommit && !$SkipCleanup) {
+    print "Cleaning working copies\n";
+    cleanupWc($DestWorkingDir);
+    cleanupWc($SrcWorkingDir);
 }
 
 # Reset the revision map now
