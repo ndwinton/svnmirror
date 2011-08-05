@@ -445,6 +445,11 @@ foreach $rev (@remoteRevs) {
                 if (-f $to) {
                     svn("rm", "--force", "$destTo");
                 }
+                # Maybe restoring from a previously deleted revision, if so
+                # we'll have to copy from the respository
+                if (!-e $destFrom) {
+                    $destFrom = $TargetURL . $copy->{'from'};
+                }
                 svn('copy', "--parents", "$destFrom\@$rev", "$destTo");
                 # May be a modify of a file as well as a rename, so copy over
                 # the source file too!
