@@ -34,8 +34,10 @@ sub safeExec(@) {
 }
 
 sub svn {
-    print ">> svn @_\n";
-    my $result = safeExec("svn", @_);
+    my @args = @_;
+    unshift(@args, "svn");
+    print ">> @args\n";
+    my $result = safeExec(@args);
     if ($? != 0) {
         die "$0: Command failed: $result\n";
     }
@@ -125,7 +127,7 @@ sub longestCommonPath {
             push(@longest, $aParts[$i]);
         }
         else {
-            break;
+            last;
         }
     }
 
@@ -304,14 +306,16 @@ $doCopyRevprops ='';
 $RetryCommit = 0;
 $UseStatusRevprop = 0;
 $SkipCleanup = 0;
+$EndRevision = 'HEAD';
 
 GetOptions(
             "target-working-dir|w=s" => \$DestWorkingDir,
             "copy-revprops|p=s" => \$doCopyRevprops,
-            "retry-commit|r" => \$RetryCommit,
+            "retry-commit|c" => \$RetryCommit,
             "source-working-dir|s=s" => \$SrcWorkingDir,
             "use-status-revprop|u" => \$UseStatusRevprop,
             "skip-cleanup" => \$SkipCleanup,
+            "end-revision|r=s" => \$EndRevision,
           );
           
 die "Usage: $0 [options] source-url target-url\n" unless ($#ARGV == 1);
@@ -373,8 +377,8 @@ if ($latestRemote < $lowerBound) {
     exit 0;
 }
 
-print "Loading remote history from revision $lowerBound ...\n";
-$RemoteHistory = loadHistory($SourceURL, $lowerBound, 'HEAD', getRoot($SourceURL), 1);
+print "Loading remote history from revision $lowerBound to $EndRevision...\n";
+$RemoteHistory = loadHistory($SourceURL, $lowerBound, $EndRevision, getRoot($SourceURL), 1);
 @remoteRevs = historyRevisions($RemoteHistory);
 
 # If the remote URL isn't the repo root, and we're not loading a partial history,
