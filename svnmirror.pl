@@ -64,6 +64,7 @@ sub parseHistory {
         $history{$revno}{A} = [];
         $history{$revno}{M} = [];
         $history{$revno}{D} = [];
+        $history{$revno}{R} = [];
         $history{$revno}{common} = '';
         
         $history{$revno}{revprops}{'svn:author'} = $entry->{'author'};
@@ -78,7 +79,8 @@ sub parseHistory {
             if (defined($path->{'copyfrom-path'})) {
                 my $from = $path->{'copyfrom-path'};
                 my $to = $path->{'content'};
-
+                my $skipSaveAction = 0;
+                
                 if ($from =~ s!^$root/!/!) {
                     if ($to =~ s!^$root/!/!) {
                         push(@{$history{$revno}{copy}}, { 'from' => $from, 'to' => $to, 'rev' => $path->{'copyfrom-rev'} });
@@ -95,8 +97,12 @@ sub parseHistory {
                     $to =~ s!^$root/!/!;
                     push(@{$history{$revno}{copy}}, { 'to' => $to });
                 }
+                if ($path->{'action'} ne 'R') {
+                    $skipSaveAction++;
+                }
             }
-            elsif ($savePaths) {
+            
+            if ($savePaths && !$skipSaveAction) {
                 my $relPath = $path->{'content'};
                 $relPath =~ s!^$root/?\b!/!;
                 push(@{$history{$revno}{$path->{'action'}}}, $relPath);
@@ -426,7 +432,14 @@ foreach $rev (@remoteRevs) {
         
         svn('update', canonicalise("$DestWorkingDir/$commonRoot"));
         print svn('update', '-r', $rev, canonicalise("$SrcWorkingDir/$commonRoot"));
-        
+
+        # Handle replaces first (delete the file prior to copy)
+        foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'R'}})) {
+            print "> Replacing $del\n";
+            my $togo = canonicalise("$DestWorkingDir/$del");
+            svn("remove", "--force", $togo) if (-e $togo);
+        }
+                
         # Sort copies lexicographically to ensure higher paths created first
         foreach my $copy (sort {$a->{'to'} cmp $b->{'to'}} (@{$RemoteHistory->{$rev}{copy}})) {
             my $from = "." . $copy->{'from'};
@@ -447,7 +460,7 @@ foreach $rev (@remoteRevs) {
                 # Handle destination being an already existing file
                 print "> Copy to $to from $from\n";
                 if (-f $to) {
-                    svn("rm", "--force", "$destTo");
+                    svn("remove", "--force", "$destTo");
                 }
                 # Maybe restoring from a previously deleted revision, if so
                 # we'll have to copy from the respository
@@ -472,7 +485,12 @@ foreach $rev (@remoteRevs) {
             my $srcAdd = canonicalise("$SrcWorkingDir/$add");
             my $destAdd = canonicalise("$DestWorkingDir/$add");
             if (-d $srcAdd) {
-                svn("mkdir", "--parents", $destAdd);
+                if (! -d "$destAdd/.svn") {
+                    svn("mkdir", "--parents", $destAdd);
+                }
+                else {
+                    print "($destAdd is already under source control)\n";
+                }
             }
             else {
                 safeExec("cp", $srcAdd, $destAdd);
@@ -483,7 +501,8 @@ foreach $rev (@remoteRevs) {
 
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
             print "> Removing $del\n";
-            svn("remove", "--force", canonicalise("$DestWorkingDir/$del"));
+            my $togo = canonicalise("$DestWorkingDir/$del");
+            svn("remove", "--force", $togo) if (-e $togo);
         }        
 
         foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
