@@ -164,15 +164,8 @@ sub loadRevisionMap {
     }
 }
 
-sub wcVersion {
-    svn("update", "--depth", "empty", @_);
-    my $xml = svn("info", "--xml", @_);
-    my $parseTree = XMLin($xml);
-    $parseTree->{'entry'}{'revision'};
-}
-
 sub latestCommit {
-    svn("update", "--depth", "empty", @_);
+    svn("update", "--depth", "empty", @_) unless ($_[0] =~ m!^\w+://!);
     my $xml = svn("info", "--xml", @_);
     my $parseTree = XMLin($xml);
     $parseTree->{'entry'}{'commit'}{'revision'};
