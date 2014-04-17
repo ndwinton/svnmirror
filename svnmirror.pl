@@ -4,6 +4,7 @@ use XML::Simple;
 use Data::Dumper;
 use Getopt::Long;
 use Cwd;
+use URI::Escape;
 
 $NOWHERE = "<<<SOMEWHERE-OUTSIDE-THE-TREE>>>";
 
@@ -295,6 +296,16 @@ sub canonicalise {
     $path;
 }
 
+sub escapeAt {
+    my $path = shift;
+    if ($path =~ /\@/) {
+        # '@' added at the end to avoid svn interpreting embedded
+        # @ characters as revision specifiers
+        $path .= '@';
+    }
+    $path;
+}
+
 ###
 ### Main Code
 ###
@@ -423,14 +434,14 @@ foreach $rev (@remoteRevs) {
         $commonRoot =~ s!/[^/]*$!/! unless (-d "$SrcWorkingDir/$commonRoot");
         $commonRoot = canonicalise($commonRoot);
         
-        svn('update', canonicalise("$DestWorkingDir/$commonRoot"));
+        svn('update', '-r', 'HEAD', escapeAt(canonicalise("$DestWorkingDir/$commonRoot")));
         print svn('update', '-r', $rev, canonicalise("$SrcWorkingDir/$commonRoot"));
 
         # Handle replaces first (delete the file prior to copy)
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'R'}})) {
             print "> Replacing $del\n";
             my $togo = canonicalise("$DestWorkingDir/$del");
-            svn("remove", "--force", $togo) if (-e $togo);
+            svn("remove", "--force", escapeAt($togo)) if (-e $togo);
         }
                 
         # Sort copies lexicographically to ensure higher paths created first
@@ -445,28 +456,28 @@ foreach $rev (@remoteRevs) {
             if ($copy->{'from'} eq '') {
                 # Import from outside the tree
                 print "> Copy to $to from outside the tree\n";
-                svn("export", "$srcTo", "$destTo");
-                svn("add", "$destTo");
+                svn("export", escapeAt("$srcTo"), "$destTo");
+                svn("add", "--parents", escapeAt("$destTo"));
                 ### TODO: Handle properties on copied-in files
             }
             elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
                 print "> Copy to $to from $from\n";
                 if (-f $destTo) {
-                    svn("remove", "--force", "$destTo");
+                    svn("remove", "--force", escapeAt("$destTo"));
                 }
                 # Maybe restoring from a previously deleted revision, if so
                 # we'll have to copy from the respository
                 if (!-e $destFrom) {
-                    $destFrom = $TargetURL . $copy->{'from'};
+                    $destFrom = $TargetURL . join('/', map { uri_escape($_); } split('/', $copy->{'from'}));
                 }
                 svn('copy', "--parents", "$destFrom\@$rev", "$destTo");
                 # May be a modify of a file as well as a rename, so copy over
                 # the source file too!
                 if (-f "$SrcWorkingDir/$to") {
                     print ">> cp -f $srcTo $destTo\n";
-                    safeExec("cp", "-f", "$srcTo", "$destTo");
-                    setProperties("$destTo", getProperties("$srcTo"));
+                    safeExec("cp", "-f", escapeAt("$srcTo"), "$destTo");
+                    setProperties(escapeAt("$destTo"), getProperties(escapeAt("$srcTo")));
                 }
             }
         }
@@ -479,23 +490,23 @@ foreach $rev (@remoteRevs) {
             my $destAdd = canonicalise("$DestWorkingDir/$add");
             if (-d $srcAdd) {
                 if (! -d "$destAdd/.svn") {
-                    svn("mkdir", "--parents", $destAdd);
+                    svn("mkdir", "--parents", escapeAt($destAdd));
                 }
                 else {
                     print "($destAdd is already under source control)\n";
                 }
             }
             else {
-                safeExec("cp", $srcAdd, $destAdd);
-                svn("add", $destAdd);
+                safeExec("cp", escapeAt($srcAdd), $destAdd);
+                svn("add", "--parents", escapeAt($destAdd));
             }
-            setProperties($destAdd, getProperties($srcAdd));
+            setProperties(escapeAt($destAdd), getProperties(escapeAt($srcAdd)));
         }
 
         foreach my $del (sort {$b cmp $a} (@{$RemoteHistory->{$rev}{'D'}})) {
             print "> Removing $del\n";
             my $togo = canonicalise("$DestWorkingDir/$del");
-            svn("remove", "--force", $togo) if (-e $togo);
+            svn("remove", "--force", escapeAt($togo)) if (-e $togo);
         }        
 
         foreach my $mod (sort(@{$RemoteHistory->{$rev}{'M'}})) {
@@ -504,9 +515,9 @@ foreach $rev (@remoteRevs) {
             my $destMod= canonicalise("$DestWorkingDir/$mod");
             if (! -d $srcMod) {
                 print ">> cp -f $srcMod $destMod\n";
-                safeExec("cp", "-f", $srcMod, $destMod);
+                safeExec("cp", "-f", escapeAt($srcMod), $destMod);
             }
-            setProperties($destMod, getProperties($srcMod));
+            setProperties(escapeAt($destMod), getProperties(escapeAt($srcMod)));
         }        
     }
     
@@ -515,7 +526,7 @@ foreach $rev (@remoteRevs) {
         $msg .= "\nAuthor: $RemoteHistory->{$rev}{revprops}{'svn:author'}\nDate: $RemoteHistory->{$rev}{revprops}{'svn:date'}\nRevision: $rev";
     }
     
-    print svn('commit', '-m', $msg, canonicalise("$DestWorkingDir/$commonRoot"));
+    print svn('commit', '-m', $msg, escapeAt(canonicalise("$DestWorkingDir/$commonRoot")));
     
     my $newRev = latestCommit($DestWorkingDir);
     print "> Local revision $newRev created\n";
