@@ -262,7 +262,7 @@ sub setProperties {
     my %props = @_;
     
     foreach my $property (keys(%props)) {
-        svn("propset", $property, $props{$property}, $file);
+        svn("propset", "--force", $property, $props{$property}, $file);
     }
 }
 
@@ -452,7 +452,7 @@ foreach $rev (@remoteRevs) {
             elsif ($copy->{'to'} ne $NOWHERE) {
                 # Handle destination being an already existing file
                 print "> Copy to $to from $from\n";
-                if (-f $to) {
+                if (-f $destTo) {
                     svn("remove", "--force", "$destTo");
                 }
                 # Maybe restoring from a previously deleted revision, if so
@@ -524,13 +524,13 @@ foreach $rev (@remoteRevs) {
     
     foreach my $revprop (keys(%{$RemoteHistory->{$rev}{revprops}})) {
         if (revpropMustBeCopied($revprop)) {
-            svn("propset", $revprop, "--revprop", "--revision", $newRev,
+            svn("propset", "--force", $revprop, "--revprop", "--revision", $newRev,
                 $RemoteHistory->{$rev}{revprops}{$revprop}, "$DestWorkingDir");
         }
     }
     
     if ($UseStatusRevprop) {
-        svn("propset", "svnmirror:info", "--revprop", "--revision", $newRev,
+        svn("propset", "--force", "svnmirror:info", "--revprop", "--revision", $newRev,
                 "$rev/$RemoteHistory->{$rev}{revprops}{'svn:date'}", "$DestWorkingDir");
     }
         
