@@ -476,7 +476,7 @@ foreach $rev (@remoteRevs) {
                 # the source file too!
                 if (-f "$SrcWorkingDir/$to") {
                     print ">> cp -f $srcTo $destTo\n";
-                    safeExec("cp", "-f", escapeAt("$srcTo"), "$destTo");
+                    safeExec("cp", "-f", "$srcTo", "$destTo");
                     setProperties(escapeAt("$destTo"), getProperties(escapeAt("$srcTo")));
                 }
             }
@@ -497,7 +497,7 @@ foreach $rev (@remoteRevs) {
                 }
             }
             else {
-                safeExec("cp", escapeAt($srcAdd), $destAdd);
+                safeExec("cp", $srcAdd, $destAdd);
                 svn("add", "--parents", escapeAt($destAdd));
             }
             setProperties(escapeAt($destAdd), getProperties(escapeAt($srcAdd)));
@@ -515,7 +515,7 @@ foreach $rev (@remoteRevs) {
             my $destMod= canonicalise("$DestWorkingDir/$mod");
             if (! -d $srcMod) {
                 print ">> cp -f $srcMod $destMod\n";
-                safeExec("cp", "-f", escapeAt($srcMod), $destMod);
+                safeExec("cp", "-f", $srcMod, $destMod);
             }
             setProperties(escapeAt($destMod), getProperties(escapeAt($srcMod)));
         }        
