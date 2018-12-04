@@ -4,7 +4,7 @@ This Perl script mirrors changes from one Subversion repository into another (ac
 Consult the tests in the test script for some idea of how to use it.
 
 ---
-Copyright &copy; 2013 Neil Winton
+Copyright &copy; 2011 Neil Winton
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 following conditions are met:
